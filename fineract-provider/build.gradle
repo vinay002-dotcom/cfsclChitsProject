@@ -1,0 +1,342 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+description = 'Fineract Provider'
+
+apply plugin: 'rebel'
+apply plugin: 'war'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'openjpa'
+apply plugin: 'com.gorylenko.gradle-git-properties'
+apply plugin: 'io.swagger.core.v3.swagger-gradle-plugin'
+apply plugin: 'distribution'
+apply plugin: 'signing'
+
+// Configuration for the OpenJPA enhance task
+// https://github.com/radcortez/openjpa-gradle-plugin
+System.setProperty("openjpa.Log", "commons")
+
+openjpa {
+    includes = [
+        '**/AbstractPersistableCustom.class',
+        '**/domain/*.class'
+    ]
+    enhance {
+        enforcePropertyRestrictions true
+    }
+}
+
+// Configuration for Swagger documentation generation task
+// https://github.com/swagger-api/swagger-core/tree/master/modules/swagger-gradle-plugin
+import org.apache.tools.ant.filters.ReplaceTokens
+
+task prepareInputYaml(dependsOn: 'generateGitProperties') {
+    doLast {
+        def versionForSwagger
+
+        if(project.ext.properties.containsKey("gitProps"))
+            versionForSwagger = project.ext.gitProps['git.commit.id.describe']
+        else
+            versionForSwagger = "unknown"
+
+        copy {
+            from file('config/swagger/fineract-input.yaml.template')
+            into file('config/swagger')
+            rename { String filename -> return 'fineract-input.yaml' }
+            filter(ReplaceTokens, tokens: [VERSION: versionForSwagger])
+        }
+    }
+}
+
+
+resolve {
+    logging.captureStandardOutput LogLevel.INFO
+    outputFileName = 'fineract'
+    outputFormat = 'YAML'
+    prettyPrint = 'TRUE'
+    classpath = sourceSets.main.runtimeClasspath
+    outputDir = file("${buildDir}/classes/java/main/static/swagger-ui")
+    openApiFile = file("config/swagger/fineract-input.yaml")
+}
+
+resolve.dependsOn prepareInputYaml
+
+configurations {
+    providedRuntime // needed for Spring Boot executable WAR
+    providedCompile
+    compile() {
+        exclude module: 'hibernate-entitymanager'
+        exclude module: 'hibernate-validator'
+        exclude module: 'activation'
+        exclude module: 'bcmail-jdk14'
+        exclude module: 'bcprov-jdk14'
+        exclude module: 'bctsp-jdk14'
+        exclude module: 'c3p0'
+        exclude module: 'stax-api'
+        exclude module: 'jaxb-api'
+        exclude module: 'jaxb-impl'
+        exclude module: 'jboss-logging'
+        exclude module: 'itext-rtf'
+        exclude module: 'classworlds'
+    }
+    runtime
+}
+
+apply from: 'dependencies.gradle'
+/* TODO https://issues.apache.org/jira/browse/FINERACT-939 (dev-dependencies.gradle has been removed, as totally broken)
+ // Pick up dependencies based on the environment, defaults to production
+ if (project.hasProperty('env') && project.getProperty('env') == 'dev') {
+ apply from:  'dev-dependencies.gradle'
+ }  else {
+ apply from: 'dependencies.gradle'
+ }
+ */
+
+/* Enable Oauth2 authentication based on environment, default to HTTP basic auth */
+if (project.hasProperty('security') && project.getProperty('security') == 'oauth') {
+    if(project.hasProperty('twofactor') && project.getProperty('twofactor') == 'enabled') {
+        copy {
+            from './properties/oauth/twofactor/'
+            into 'src/main/resources/'
+            include '*.properties'
+        }
+    } else {
+        copy {
+            from './properties/oauth/'
+            into 'src/main/resources/'
+            include '*.properties'
+        }
+    }
+}  else {
+    if(project.hasProperty('twofactor') && project.getProperty('twofactor') == 'enabled') {
+        copy {
+            from './properties/basicauth/twofactor/'
+            into 'src/main/resources/'
+            include '*.properties'
+        }
+    } else {
+        copy {
+            from './properties/basicauth/'
+            into 'src/main/resources/'
+            include '*.properties'
+        }
+    }
+}
+
+// Configuration for the modernizer plugin
+// https://github.com/andygoossens/gradle-modernizer-plugin
+modernizer {
+    ignoreClassNamePatterns = [
+        '.*AbstractPersistableCustom',
+        '.*EntityTables'
+    ]
+}
+
+compileJava {
+    dependsOn rat
+    finalizedBy resolve
+}
+
+war {
+    from("$rootDir/licenses/binary/") {
+        // notice the parens
+        into "WEB-INF/licenses/binary/" // no leading slash
+    }
+    from("$rootDir/LICENSE_RELEASE") {
+        // notice the parens
+        into "WEB-INF/" // no leading slash
+    }
+    from("$rootDir/NOTICE_RELEASE") {
+        // notice the parens
+        into "WEB-INF/" // no leading slash
+    }
+    rename ('LICENSE_RELEASE', 'LICENSE')
+    rename ('NOTICE_RELEASE', 'NOTICE')
+
+    from("$rootDir/DISCLAIMER") {
+        // notice the parens
+        into "WEB-INF/" // no leading slash
+    }
+    enabled = true
+}
+
+/* http://stackoverflow.com/questions/19653311/jpa-repository-works-in-idea-and-production-but-not-in-gradle */
+sourceSets.main.output.resourcesDir = sourceSets.main.java.outputDir
+sourceSets.test.output.resourcesDir = sourceSets.test.java.outputDir
+
+/* Exclude maria db related files for non dev builds */
+if (!(project.hasProperty('env') && project.getProperty('env') == 'dev')) {
+    sourceSets {
+        main {
+            java {
+                exclude '**/ServerWithMariaDB*'
+                exclude '**/MariaDB4j*'
+            }
+        }
+        test {
+            java {
+                exclude '**/core/boot/tests/**'
+            }
+        }
+    }
+}
+
+// Configuration for SQL tasks
+// https://docs.groovy-lang.org/latest/html/api/groovy/sql/Sql.html
+import groovy.sql.Sql
+
+project.ext.mysqlUser='root'
+project.ext.mysqlPassword='mysql'
+
+configurations {
+    driver
+}
+dependencies {
+    driver 'org.drizzle.jdbc:drizzle-jdbc:1.4'
+}
+
+URLClassLoader loader = GroovyObject.class.classLoader
+configurations.driver.each {File file ->
+    loader.addURL(file.toURL())
+}
+
+task createDB {
+    description= "Creates the Database. Needs database name to be passed (like: -PdbName=someDBname)"
+    doLast {
+        def sql = Sql.newInstance( 'jdbc:mysql:thin://localhost:3306/', mysqlUser, mysqlPassword, 'org.drizzle.jdbc.DrizzleDriver' )
+        sql.execute( 'create database '+"`$dbName`" )
+    }
+}
+
+task dropDB {
+    description= "Drops the specified database. The database name has to be passed (like: -PdbName=someDBname)"
+    doLast {
+        def sql = Sql.newInstance( 'jdbc:mysql:thin://localhost:3306/', mysqlUser, mysqlPassword, 'org.drizzle.jdbc.DrizzleDriver' )
+        sql.execute( 'DROP DATABASE '+"`$dbName`")
+    }
+}
+task setBlankPassword {
+    doLast {
+        def sql = Sql.newInstance( 'jdbc:mysql:thin://localhost:3306/', mysqlUser, mysqlPassword, 'org.drizzle.jdbc.DrizzleDriver' )
+        sql.execute('USE `fineract_tenants`')
+        sql.execute('UPDATE fineract_tenants.tenants SET schema_server = \'localhost\', schema_server_port = \'3306\', schema_username = \'mifos\', schema_password = \'mysql\' WHERE id=1;')
+    }
+}
+
+bootRun {
+    jvmArgs = [
+    	
+        "-Dspring.output.ansi.enabled=ALWAYS"
+    ]
+}
+
+springBoot {
+    mainClassName = 'org.apache.fineract.ServerApplication'
+}
+
+bootJar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+bootWar {
+    enabled = false
+}
+
+tasks.withType(Tar) {
+    compression Compression.GZIP
+    extension 'tar.gz'
+}
+
+distributions {
+    binary {
+        baseName "apache-fineract-$releaseVersion-binary"
+        contents {
+            from bootJar
+            from war
+            // TODO: @vidakovic add client library
+            from("$rootDir/licenses/binary/") {
+                into "licenses/binary/"
+            }
+            from "$rootDir/LICENSE_RELEASE"
+            from "$rootDir/NOTICE_RELEASE"
+            rename ('LICENSE_RELEASE', 'LICENSE')
+            rename ('NOTICE_RELEASE', 'NOTICE')
+
+            from "$rootDir/DISCLAIMER"
+            from "$rootDir/README.md"
+        }
+    }
+    src {
+        baseName "apache-fineract-$releaseVersion-src"
+        contents {
+            from "$rootDir/"
+            exclude '**/build' , '.git', '.gradle', '.github', '.settings', '.project', '.classpath', '.idea', 'out', '._.DS_Store', '.DS_Store', 'WebContent', '.externalToolbuilders', '.theia', '.gitpod.yml', '.travis.yml', 'LICENSE_RELEASE', 'NOTICE_RELEASE', '**/licenses/binary'
+            rename ('LICENSE_SOURCE', 'LICENSE')
+            rename ('NOTICE_SOURCE', 'NOTICE')
+        }
+    }
+}
+
+tasks.binaryDistZip.enabled false
+tasks.srcDistZip.enabled false
+
+// create signatures and checksums only if project parameter "fineract.release" is provided on the command line
+if( project.hasProperty("fineract.release") ) {
+    signing {
+        useGpgCmd()
+        sign (binaryDistTar, srcDistTar)
+    }
+    tasks.withType(Tar) { task ->
+        task.doLast {
+            ant.checksum file: task.archivePath, algorithm: 'SHA-512', fileext: '.sha512'
+        }
+    }
+    tasks.withType(Sign) { task ->
+        task.doLast {
+            task.getFilesToSign().each { f ->
+                new ByteArrayOutputStream().withStream { os ->
+                    def result = exec {
+                        workingDir "$buildDir/distributions"
+                        executable 'sh'
+                        args '-c', "gpg --verify ${f}.asc"
+                        standardOutput = os
+                    }
+                    if(result.exitValue==0) {
+                        println '+++ GPG signature correct!'
+                    } else {
+                        println '--- GPG signature incorrect!'
+                        throw new RuntimeException('--- GPG signature incorrect!')
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Configuration for git properties gradle plugin
+// https://github.com/n0mer/gradle-git-properties
+gitProperties {
+    gitPropertiesResourceDir = "$buildDir/classes/java/main/resources"
+    dateFormat = "yyyy-MM-dd'T'HH:mmZ"
+    dateFormatTimeZone = "GMT"
+    failOnNoGitDirectory = false
+    extProperty = 'gitProps'
+}
+
+// make sure the generateGitProperties task always executes (even when git.properties is not changed)
+generateGitProperties.outputs.upToDateWhen { false }
